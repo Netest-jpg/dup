@@ -29,6 +29,9 @@ enum Commands {
 
         #[arg(short, long)]
         list: bool,
+
+        #[arg(short, long, default_value = "8", value_parser = clap::value_parser!(u8).range(0..=64))]
+        threshold: u8,
     },
 }
 
@@ -119,10 +122,10 @@ fn main() {
             directory,
             recursive,
             list,
+            threshold,
         } => {
             let mut failure_count = 0;
             let mut images: Vec<Image> = Vec::new();
-            let threshold = 5;
 
             if !directory.exists() {
                 eprintln!(
@@ -166,17 +169,16 @@ fn main() {
 
                 match load_image(entry.path()) {
                     Ok(image) => {
-                        let hash = perceptual_hash(&image);
                         if list {
                             println!(
-                                "Image: {:?}\n  Path: {:?}\n  Dimension: {}x{}\n  Hash: {}",
+                                "Image: {:?}\n  Path: {:?}\n  Dimension: {}x{}",
                                 entry.file_name(),
                                 entry.path(),
                                 image.width(),
-                                image.height(),
-                                hash
+                                image.height()
                             );
                         }
+                        let hash = perceptual_hash(&image);
                         images.push(Image {
                             path: entry.path().to_path_buf(),
                             hash,
@@ -198,7 +200,7 @@ fn main() {
                 for j in (i + 1)..images.len() {
                     let distance = hamming_distance(images[i].hash, images[j].hash);
 
-                    if distance <= threshold {
+                    if distance <= threshold as u32 {
                         uf.union(i, j);
                     }
                 }
