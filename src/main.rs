@@ -10,35 +10,6 @@ mod phash;
 use crate::phash::PerceptualHash;
 use phash::{hamming_distance, perceptual_hash};
 
-#[derive(Parser, Debug)]
-#[command(version, about = "Find and group near-duplicate images")]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand, Debug)]
-enum Commands {
-    /// Find and report near-duplicate images.
-    Scan {
-        /// Directory to scan
-        #[arg(default_value = ".")]
-        directory: PathBuf,
-
-        /// Scan subdirectories recursively.
-        #[arg(short, long)]
-        recursive: bool,
-
-        /// Lists similar images as sets.
-        #[arg(short, long)]
-        list: bool,
-
-        /// Sets threshold. Range: [0, 64]
-        #[arg(short, long, default_value = "8", value_parser = clap::value_parser!(u8).range(0..=64))]
-        threshold: u8,
-    },
-}
-
 #[derive(Debug)]
 struct Image {
     path: PathBuf,
@@ -86,6 +57,57 @@ impl UnionFind {
     }
 }
 
+#[derive(Parser, Debug)]
+#[command(version, about = "Find and group near-duplicate images")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Find and report near-duplicate images.
+    Scan {
+        /// Directory to scan
+        #[arg(default_value = ".")]
+        directory: PathBuf,
+
+        /// Scan subdirectories recursively.
+        #[arg(short, long)]
+        recursive: bool,
+
+        /// Lists all the images found.
+        #[arg(short, long)]
+        show_all_images: bool,
+
+        #[arg(long)]
+        show_set: bool,
+
+        /// Sets threshold. Range: [0, 64]
+        #[arg(short, long, default_value = "8", value_parser = clap::value_parser!(u8).range(0..=64))]
+        threshold: u8,
+    },
+}
+
+#[inline]
+fn valid_directory(directory: &Path) {
+    if !directory.exists() {
+        eprintln!(
+            "\x1b[31mError:\x1b[0m Directory validation failure\n  Path: {:?}\n  Reason: Directory does not exist",
+            directory
+        );
+        std::process::exit(1);
+    }
+
+    if !directory.is_dir() {
+        eprintln!(
+            "\x1b[31mError:\x1b[0m Directory validation failure\n  Path: {:?}\n  Reason: The provided path is not a directory",
+            directory
+        );
+        std::process::exit(1);
+    }
+}
+
 #[inline]
 fn is_image_extension(path: &Path) -> bool {
     matches!(
@@ -117,16 +139,92 @@ fn load_image(path: &Path) -> Result<DynamicImage, String> {
 }
 
 #[inline]
-fn group_images(sets: &HashMap<usize, Vec<usize>>, images: &Vec<Image>) {
-    let mut i = 0;
+fn collect_images(images: &mut Vec<Image>, directory: &Path, recursive: bool) {
+    for entries in WalkDir::new(directory)
+        .min_depth(1)
+        .max_depth(if recursive { usize::MAX } else { 1 })
+    {
+        let entry = match entries {
+            Ok(entry) => entry,
+            Err(error) => {
+                eprintln!(
+                    "\x1b[31mWarning\x1b[0m: Failed to read directory entry\n  Path: {:?}\n  Reason: {}",
+                    error.path().expect("Unknown"),
+                    error
+                );
+                continue;
+            }
+        };
+
+        if !entry.file_type().is_file() || !is_image_extension(entry.path()) {
+            continue;
+        }
+
+        match load_image(entry.path()) {
+            Ok(image) => {
+                let hash = perceptual_hash(&image);
+                images.push(Image {
+                    path: entry.path().to_path_buf(),
+                    hash,
+                });
+            }
+            Err(error) => {
+                eprintln!(
+                    "\x1b[31mWarning:\x1b[0m Failed to decode an image\n  File: {:?}\n  Reason: {}",
+                    entry.path(),
+                    error
+                );
+            }
+        }
+    }
+}
+
+#[inline]
+fn form_image_set(
+    sets: &mut HashMap<usize, Vec<usize>>,
+    images: &[Image],
+    uf: &mut UnionFind,
+    threshold: u8,
+) {
+    for i in 0..images.len() {
+        for j in (i + 1)..images.len() {
+            let distance = hamming_distance(images[i].hash, images[j].hash);
+
+            if distance <= threshold as u32 {
+                uf.union(i, j);
+            }
+        }
+    }
+    for i in 0..images.len() {
+        let root = uf.find(i);
+        sets.entry(root).or_default().push(i);
+    }
+}
+
+#[inline]
+fn print_info(
+    sets: &HashMap<usize, Vec<usize>>,
+    images: &[Image],
+    show_set: bool,
+    show_all_images: bool,
+) {
+    if show_all_images {
+        images.iter().for_each(|image| println!("{:?}", image.path));
+    }
+
+    let mut i: usize = 0;
     for set in sets {
         if set.1.len() >= 2 {
             i += 1;
-            println!("Set {}", i);
-            set.1.iter().for_each(|x| println!("{:?}", images[*x].path));
-            println!();
+            if show_set {
+                println!("Set {}", i);
+                set.1.iter().for_each(|x| println!("{:?}", images[*x].path));
+                println!();
+            }
         }
     }
+    println!("No. of images: {}", images.len());
+    println!("No. of image sets: {}", i);
 }
 
 fn main() {
@@ -135,113 +233,18 @@ fn main() {
         Commands::Scan {
             directory,
             recursive,
-            list,
+            show_all_images,
             threshold,
+            show_set,
         } => {
-            let mut failure_count = 0;
+            valid_directory(&directory);
             let mut images: Vec<Image> = Vec::new();
+            collect_images(&mut images, &directory, recursive);
 
-            if !directory.exists() {
-                eprintln!(
-                    "\x1b[31mError:\x1b[0m Directory validation failed\n  Path: {}\n  Reason: Directory does not exist",
-                    directory.display()
-                );
-                std::process::exit(1);
-            }
-
-            if !directory.is_dir() {
-                eprintln!(
-                    "\x1b[31mError:\x1b[0m Directory validation failed\n  Path: {}\n  Reason: The provided path is not a directory",
-                    directory.display()
-                );
-                std::process::exit(1);
-            }
-
-            for entries in WalkDir::new(&directory)
-                .min_depth(1)
-                .max_depth(if recursive { usize::MAX } else { 1 })
-            {
-                let entry = match entries {
-                    Ok(entry) => entry,
-                    Err(error) => {
-                        eprintln!(
-                            "\x1b[31mWarning\x1b[0m: Failed to read directory entry\n  Path: {}\n  Reason: {}",
-                            error
-                                .path()
-                                .map(|path| path.display().to_string())
-                                .unwrap_or_else(|| "Unknown".to_string()),
-                            error
-                        );
-                        failure_count += 1;
-                        continue;
-                    }
-                };
-
-                if !entry.file_type().is_file() || !is_image_extension(entry.path()) {
-                    continue;
-                }
-
-                match load_image(entry.path()) {
-                    Ok(image) => {
-                        if list {
-                            println!(
-                                "Image: {:?}\n  Path: {:?}\n  Dimension: {}x{}",
-                                entry.file_name(),
-                                entry.path(),
-                                image.width(),
-                                image.height()
-                            );
-                        }
-                        let hash = perceptual_hash(&image);
-                        images.push(Image {
-                            path: entry.path().to_path_buf(),
-                            hash,
-                        });
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "\x1b[31mWarning:\x1b[0m Failed to decode an image\n  File: {:?}\n  Reason: {}",
-                            entry.path(),
-                            error
-                        );
-                        failure_count += 1;
-                    }
-                }
-            }
-
-            let mut uf = UnionFind::new(images.len());
-            for i in 0..images.len() {
-                for j in (i + 1)..images.len() {
-                    let distance = hamming_distance(images[i].hash, images[j].hash);
-
-                    if distance <= threshold as u32 {
-                        uf.union(i, j);
-                    }
-                }
-            }
-            let mut component_sizes = vec![0usize; images.len()];
+            let mut union_find = UnionFind::new(images.len());
             let mut sets: HashMap<usize, Vec<usize>> = HashMap::new();
-            for i in 0..images.len() {
-                let root = uf.find(i);
-                sets.entry(root).or_default().push(i);
-                component_sizes[root] += 1;
-            }
-
-            let mut similar_images = 0;
-            let mut similar_sets = 0;
-
-            for size in component_sizes {
-                if size >= 2 {
-                    similar_images += size;
-                    similar_sets += 1;
-                }
-            }
-
-            group_images(&sets, &images);
-            println!("Total No. of images: {}", images.len());
-            println!("No. of similar images: {}", similar_images);
-            println!("No. of sets of similar images: {}", similar_sets);
-            println!("Traversal error: {failure_count}");
+            form_image_set(&mut sets, &images, &mut union_find, threshold);
+            print_info(&sets, &images, show_set, show_all_images);
         }
     }
 }
