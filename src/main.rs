@@ -1,12 +1,14 @@
 use clap::{Parser, Subcommand};
 use image::{DynamicImage, ImageReader};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 use walkdir::WalkDir;
 
 mod phash;
-use phash::{hamming_distance, perceptual_hash};
-
 use crate::phash::PerceptualHash;
+use phash::{hamming_distance, perceptual_hash};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Find and group near-duplicate images")]
@@ -27,9 +29,11 @@ enum Commands {
         #[arg(short, long)]
         recursive: bool,
 
+        /// Lists similar images as sets.
         #[arg(short, long)]
         list: bool,
 
+        /// Sets threshold. Range: [0, 64]
         #[arg(short, long, default_value = "8", value_parser = clap::value_parser!(u8).range(0..=64))]
         threshold: u8,
     },
@@ -81,7 +85,6 @@ impl UnionFind {
         }
     }
 }
-//--------------------------------------------------
 
 #[inline]
 fn is_image_extension(path: &Path) -> bool {
@@ -113,7 +116,18 @@ fn load_image(path: &Path) -> Result<DynamicImage, String> {
     reader.decode().map_err(|e| format!("{e}"))
 }
 
-//-------------------------------------------------------------------------
+#[inline]
+fn group_images(sets: &HashMap<usize, Vec<usize>>, images: &Vec<Image>) {
+    let mut i = 0;
+    for set in sets {
+        if set.1.len() >= 2 {
+            i += 1;
+            println!("Set {}", i);
+            set.1.iter().for_each(|x| println!("{:?}", images[*x].path));
+            println!();
+        }
+    }
+}
 
 fn main() {
     let cli = Cli::parse();
@@ -206,9 +220,10 @@ fn main() {
                 }
             }
             let mut component_sizes = vec![0usize; images.len()];
-
+            let mut sets: HashMap<usize, Vec<usize>> = HashMap::new();
             for i in 0..images.len() {
                 let root = uf.find(i);
+                sets.entry(root).or_default().push(i);
                 component_sizes[root] += 1;
             }
 
@@ -221,6 +236,8 @@ fn main() {
                     similar_sets += 1;
                 }
             }
+
+            group_images(&sets, &images);
             println!("Total No. of images: {}", images.len());
             println!("No. of similar images: {}", similar_images);
             println!("No. of sets of similar images: {}", similar_sets);
